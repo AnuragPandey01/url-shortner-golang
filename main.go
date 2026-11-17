@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type UrlModel struct {
@@ -42,7 +41,7 @@ func writeError(w http.ResponseWriter, status int, code, message string, err err
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-var conn *pgxpool.Pool
+var conn *pgx.Conn
 
 // POST /api/shorten?q="{url}"
 func CreateShortCode(w http.ResponseWriter, r *http.Request) {
@@ -139,12 +138,12 @@ func main() {
 	ctx := context.Background()
 
 	var err error
-	conn, err = pgxpool.New(ctx, "postgres://user:password@db:5432/url-db")
+	conn, err = pgx.Connect(ctx, "postgres://user:password@db:5432/url-db")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 		os.Exit(1)
 	}
-	defer conn.Close()
+	defer conn.Close(ctx)
 
 	//create table
 	createTableQuery := `
