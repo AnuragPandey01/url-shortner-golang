@@ -141,8 +141,8 @@ func main() {
 	var err error
 	conf, _ := pgxpool.ParseConfig("postgres://user:password@db:5432/url-db")
 	conf.ConnConfig.ConnectTimeout = time.Millisecond * 200
-	conf.MaxConns = 5
-	conf.MinConns = 2
+	conf.MaxConns = 3
+	conf.MinConns = 1
 	
 	conn, err = pgxpool.NewWithConfig(ctx, conf)
 	if err != nil {
