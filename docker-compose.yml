@@ -22,6 +22,12 @@ services:
     volumes:
         - pgdata:/var/lib/postgresql
 
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass password
 
   adminer:
     image: adminer

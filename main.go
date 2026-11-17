@@ -14,6 +14,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
+)
+
+const (
+	CACHE_TTL_DURATION         time.Duration    = time.Second * 86400
 )
 
 type UrlModel struct {
@@ -43,6 +48,7 @@ func writeError(w http.ResponseWriter, status int, code, message string, err err
 }
 
 var conn *pgxpool.Pool
+var rdb *redis.Client
 
 // POST /api/shorten?q="{url}"
 func CreateShortCode(w http.ResponseWriter, r *http.Request) {
@@ -110,6 +116,16 @@ func ResolveShortCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var longUrl string
+
+	//check cache
+	if rdb != nil {
+		longUrl, err := rdb.Get(ctx, shortCode).Result()
+		if err == nil{
+			http.Redirect(w, r, longUrl, http.StatusFound)
+			return
+		}
+	}
+
 	var query = `
 		SELECT url
 		FROM url
@@ -126,6 +142,10 @@ func ResolveShortCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if rdb != nil {
+		rdb.Set(ctx, shortCode, longUrl, CACHE_TTL_DURATION)
+	}
+
 	http.Redirect(w, r, longUrl, http.StatusFound)
 }
 
@@ -135,7 +155,7 @@ func registerHandlers() {
 }
 
 func main() {
-
+	fmt.Println("Starting application...")
 	ctx := context.Background()
 
 	var err error
@@ -143,7 +163,7 @@ func main() {
 	conf.ConnConfig.ConnectTimeout = time.Millisecond * 200
 	conf.MaxConns = 3
 	conf.MinConns = 1
-	
+
 	conn, err = pgxpool.NewWithConfig(ctx, conf)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
@@ -161,10 +181,27 @@ func main() {
 	`
 	conn.Exec(ctx, createTableQuery)
 
+	rdb = redis.NewClient(&redis.Options{
+		Addr:     "redis:6379",
+		Password: "password",
+		DB:       0,
+	})
+	defer rdb.Close()
+
+	if err := rdb.ConfigSet(ctx, "maxmemory", "512mb").Err(); err != nil {
+		log.Fatalf("failed to set maxmemory: %v", err)
+	}
+	
+	if err := rdb.ConfigSet(ctx, "maxmemory-policy", "allkeys-lru").Err(); err != nil {
+		log.Fatalf("failed to set maxmemory-policy: %v", err)
+	}
+
 	http.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "healthy!")
 	})
 	registerHandlers()
+
+	fmt.Println("Server started!")
 
 	err = http.ListenAndServe(":8080", nil)
 
