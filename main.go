@@ -139,7 +139,12 @@ func main() {
 	ctx := context.Background()
 
 	var err error
-	conn, err = pgxpool.New(ctx, "postgres://user:password@db:5432/url-db")
+	conf, _ := pgxpool.ParseConfig("postgres://user:password@db:5432/url-db")
+	conf.ConnConfig.ConnectTimeout = time.Millisecond * 200
+	conf.MaxConns = 5
+	conf.MinConns = 2
+	
+	conn, err = pgxpool.NewWithConfig(ctx, conf)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
 		os.Exit(1)
