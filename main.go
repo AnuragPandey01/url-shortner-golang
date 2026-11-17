@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
@@ -11,13 +12,13 @@ import (
 	"strings"
 	"time"
 
-	// "github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type UrlModel struct {
-	id         int
-	url        string
+	id        int
+	url       string
 	shortCode string
 }
 
@@ -25,32 +26,46 @@ type ShortenResponse struct {
 	ShortUrl string `json:"short_url"`
 }
 
+type ErrorResponse struct {
+	Code    string `json:"code"`
+	Error   string `json:"error"`
+	Details string `json:"details,omitempty"`
+}
+
+func writeError(w http.ResponseWriter, status int, code, message string, err error) {
+	payload := ErrorResponse{Code: code, Error: message}
+	if err != nil {
+		payload.Details = err.Error()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
 var conn *pgxpool.Pool
 
-//POST /api/shorten?q="{url}"
+// POST /api/shorten?q="{url}"
 func CreateShortCode(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	if conn == nil {
-		http.Error(w, "db connection not available", http.StatusInternalServerError)
+		writeError(w, http.StatusServiceUnavailable, "db_unavailable", "db connection not available", nil)
 		return
 	}
 
 	url := r.URL.Query().Get("q")
-	ctx := context.Background()
+	ctx := r.Context()
 
-	fmt.Print(url)
-	
 	if !strings.HasPrefix(url, "https://") {
-		http.Error(w, "not a valid url", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid_url", "not a valid url", nil)
 		return
 	}
 
 	//get id
 	var id int
 	if err := conn.QueryRow(ctx, "SELECT nextval(pg_get_serial_sequence('url', 'id'));").Scan(&id); err != nil {
-		http.Error(w, "error db connection", http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "db_sequence_failed", "failed to allocate URL ID", err)
 		return
 	}
 
@@ -58,14 +73,13 @@ func CreateShortCode(w http.ResponseWriter, r *http.Request) {
 	var i big.Int
 	i.SetInt64(now)
 	shortCode := i.Text(62)
-	
 
 	insertQuery := `
 		INSERT INTO url (url, short_code) VALUES ($1, $2);
 	`
-	
-	if _, err := conn.Exec(context.Background(), insertQuery, url, shortCode); err != nil {
-		http.Error(w, "error generating shortcode", http.StatusInternalServerError)
+
+	if _, err := conn.Exec(ctx, insertQuery, url, shortCode); err != nil {
+		writeError(w, http.StatusInternalServerError, "db_insert_failed", "error generating shortcode", err)
 		return
 	}
 
@@ -75,25 +89,23 @@ func CreateShortCode(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusCreated)
 
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		http.Error(w, "Failed to encode JSON", http.StatusInternalServerError)
-	}
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
-//GET /api/r/{shortcode}
+// GET /api/r/{shortcode}
 func ResolveShortCode(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	if conn == nil {
-		http.Error(w, "db connection not available", http.StatusInternalServerError)
+		writeError(w, http.StatusServiceUnavailable, "db_unavailable", "db connection not available", nil)
 		return
 	}
 
 	shortCode := r.PathValue("shortCode")
-	ctx := context.Background()
+	ctx := r.Context()
 
 	if shortCode == "" {
-		http.Error(w, "short code missing", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "missing_short_code", "short code missing", nil)
 		return
 	}
 
@@ -105,18 +117,21 @@ func ResolveShortCode(w http.ResponseWriter, r *http.Request) {
 		LIMIT 1;
 	`
 
-	fmt.Print(shortCode+"\n")
 	if err := conn.QueryRow(ctx, query, shortCode).Scan(&longUrl); err != nil {
-		fmt.Print(err)
-		http.Error(w, "error db connection", http.StatusInternalServerError)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "short_code_not_found", "short code not found", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "db_lookup_failed", "failed to resolve short code", err)
+		}
+		return
 	}
-	
+
 	http.Redirect(w, r, longUrl, http.StatusFound)
 }
 
-func registerHandlers(){
-	http.HandleFunc("/api/shorten",CreateShortCode)
-	http.HandleFunc("/r/{shortCode}",ResolveShortCode)
+func registerHandlers() {
+	http.HandleFunc("/api/shorten", CreateShortCode)
+	http.HandleFunc("/r/{shortCode}", ResolveShortCode)
 }
 
 func main() {
@@ -136,11 +151,10 @@ func main() {
 		CREATE TABLE IF NOT EXISTS url (
 			id BIGSERIAL PRIMARY KEY,
 		 	url TEXT NOT NULL,
-			short_code VARCHAR(10) UNIQUE NOT NULL 
+			short_code VARCHAR(10) UNIQUE NOT NULL
 		);
 	`
 	conn.Exec(ctx, createTableQuery)
-	
 
 	http.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "healthy!")
